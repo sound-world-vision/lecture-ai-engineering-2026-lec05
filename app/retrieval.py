@@ -33,6 +33,7 @@ def get_all_materials() -> str:
         for page in section["content"]
     )
 
+
 def load_pages(source: Path = RAG_SOURCE) -> list[dict]:
     """資料→章→ページのJSONを、対象資料のページ一覧に変換する。"""
     documents = json.loads(source.read_text(encoding="utf-8"))
@@ -52,16 +53,19 @@ def load_pages(source: Path = RAG_SOURCE) -> list[dict]:
 def browse_tree(node_id: str | None = None) -> dict:
     """直下のページは先頭文、指定したページ自身は全文を返す。"""
     tree = json.loads(RAG_TREE.read_text(encoding="utf-8"))
-    tree["children"] = [node for node in tree["children"] if node["id"] in RAG_DOCUMENT_IDS]
+    tree["children"] = [node for node in tree["children"]
+                        if node["id"] in RAG_DOCUMENT_IDS]
     node_id = node_id or tree["id"]
     pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
 
     def describe(node, full=False):
         info = {key: node[key] for key in ("id", "kind", "title")}
         if node["kind"] == "page":
-            info.update({key: value for key, value in pages[node["id"]].items() if key != "page_id"})
+            info.update(
+                {key: value for key, value in pages[node["id"]].items() if key != "page_id"})
             if not full:
-                info["content"] = re.split(r"(?<=[。！？])|\n", info["content"].strip(), maxsplit=1)[0]
+                info["content"] = re.split(
+                    r"(?<=[。！？])|\n", info["content"].strip(), maxsplit=1)[0]
         return info
 
     remaining = [tree]
@@ -95,12 +99,14 @@ def normalized_vector(values: list[float]) -> list[float]:
 def embed_text(text: str, task_type: str) -> list[float]:
     """Geminiで文章を埋め込む。入力上限を超えた場合は切り捨てず停止する。"""
     with genai.Client(api_key=get_api_key()) as client:
-        count = client.models.count_tokens(model=EMBEDDING_MODEL, contents=text).total_tokens
+        count = client.models.count_tokens(
+            model=EMBEDDING_MODEL, contents=text).total_tokens
         if count is None or count > EMBEDDING_MAX_TOKENS:
             raise ValueError(f"埋め込み入力が上限を超えるか計測不能です: {count} tokens。")
         response = client.models.embed_content(
             model=EMBEDDING_MODEL, contents=text,
-            config=types.EmbedContentConfig(task_type=task_type, output_dimensionality=EMBEDDING_DIMENSIONS),
+            config=types.EmbedContentConfig(
+                task_type=task_type, output_dimensionality=EMBEDDING_DIMENSIONS),
         )
     embedding = response.embeddings[0]
     if embedding.statistics and embedding.statistics.truncated:
@@ -151,7 +157,8 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(
+        GRAPH_START_K, GRAPH_MAX_RESULTS)]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
@@ -165,7 +172,8 @@ def search_graph(query: str) -> dict:
             if len(path) - 1 >= GRAPH_HOPS:
                 continue
             # 同じ深さなら、接続先が少ない用語からたどる。
-            neighbors = sorted(adjacent[current], key=lambda n: (len(adjacent[n]), n))
+            neighbors = sorted(adjacent[current],
+                               key=lambda n: (len(adjacent[n]), n))
             for neighbor in neighbors:
                 if neighbor in visited:
                     continue
@@ -174,7 +182,8 @@ def search_graph(query: str) -> dict:
                 queue.append((neighbor, route))
                 if neighbor not in pages or neighbor in seed_ids:
                     continue
-                frequency = max((len(adjacent[n]) for n in route if nodes[n]["kind"] == "term"), default=0)
+                frequency = max(
+                    (len(adjacent[n]) for n in route if nodes[n]["kind"] == "term"), default=0)
                 priority = (len(route) - 1, frequency, rank, neighbor)
                 candidate = {**pages[neighbor], "hops": len(route) - 1,
                              "path": [{"id": n, "title": nodes[n]["title"]} for n in route]}
@@ -185,10 +194,117 @@ def search_graph(query: str) -> dict:
             "max_hops": GRAPH_HOPS}
 
 
+def search_tree_graph(query: str, *, candidate_limit: int = 5, max_pages: int = 10) -> dict:
+    """Graph候補をTreeの章構成と前後ページで補って返す。"""
+    if candidate_limit < 1 or max_pages < 1:
+        raise ValueError("候補数とページ数の上限は1以上にしてください。")
+    # Graphの候補にはページIDが含まれるため、まずページIDをキーに本文・引用情報を引ける形にする。
+    # 同じページIDをTreeの階層とも照合し、GraphとTreeをつなぐ共通キーとして使う。
+    pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
+    graph = search_graph(query)
+
+    # Treeを走査し、各ページが属する章と章内での順番を索引化する。
+    # この位置情報を使い、後で候補ページの前後だけを同じ章から追加できるようにする。
+    tree = json.loads(RAG_TREE.read_text(encoding="utf-8"))
+    tree["children"] = [node for node in tree.get("children", [])
+                        if node["id"] in RAG_DOCUMENT_IDS]
+    sections, locations = {}, {}
+
+    def index_tree(node):
+        children = node.get("children", [])
+        page_children = [child for child in children
+                         if child.get("kind") == "page" and child["id"] in pages]
+        if page_children:
+            section_pages = [pages[child["id"]] for child in page_children]
+            sections[node["id"]] = {
+                "id": node["id"],
+                "title": node["title"],
+                "pages": [{"page_id": page["page_id"], "page": page["page"],
+                           "title": page["title"]} for page in section_pages],
+            }
+            for index, page in enumerate(section_pages):
+                locations[page["page_id"]] = (node["id"], index)
+        for child in children:
+            if child.get("kind") != "page":
+                index_tree(child)
+
+    index_tree(tree)
+
+    # ベクトル検索で見つけたseedsを先に採用し、その後Graphで広げたexpandedを加える。
+    # 対象外のページと重複ページを除き、candidate_limitとmax_pagesの小さい方で候補数を制限する。
+    candidates = []
+    seen = set()
+    for source, retrieval in (("seeds", "seed"), ("expanded", "expanded")):
+        for hit in graph.get(source, []):
+            page_id = hit.get("page_id")
+            if page_id not in pages or page_id in seen:
+                continue
+            seen.add(page_id)
+            candidate = {**pages[page_id], "retrieval": retrieval}
+            for key in ("distance", "hops", "path"):
+                if key in hit:
+                    candidate[key] = hit[key]
+            candidates.append(candidate)
+            if len(candidates) >= min(candidate_limit, max_pages):
+                break
+        if len(candidates) >= min(candidate_limit, max_pages):
+            break
+
+    result_pages = []
+    result_ids = set()
+    # Graphの順位を保ったまま候補本文を結果に入れ、Treeで見つけた所属章のIDと見出しを付ける。
+    # Tree上の所属先が見つからない候補も、Graphの候補としては残す。
+    for candidate in candidates:
+        page_id = candidate["page_id"]
+        location = locations.get(page_id)
+        if location:
+            section_id, _ = location
+            candidate["section_id"] = section_id
+            candidate["section_title"] = sections[section_id]["title"]
+        result_pages.append(candidate)
+        result_ids.add(page_id)
+
+    # 各Graph候補の直前・直後を、同じ章のページ一覧から追加する。
+    # 章をまたいだページは加えず、重複を避けながら本文ページ全体のmax_pagesも守る。
+    for candidate in candidates:
+        location = locations.get(candidate["page_id"])
+        if not location:
+            continue
+        section_id, index = location
+        sibling_pages = sections[section_id]["pages"]
+        for neighbor_index in (index - 1, index + 1):
+            if neighbor_index < 0 or neighbor_index >= len(sibling_pages):
+                continue
+            neighbor_id = sibling_pages[neighbor_index]["page_id"]
+            if neighbor_id in result_ids or len(result_pages) >= max_pages:
+                continue
+            result_pages.append({**pages[neighbor_id], "retrieval": "tree_neighbor",
+                                 "related_to": candidate["page_id"], "section_id": section_id,
+                                 "section_title": sections[section_id]["title"]})
+            result_ids.add(neighbor_id)
+
+    relevant_section_ids = {locations[candidate["page_id"]][0]
+                            for candidate in candidates if candidate["page_id"] in locations}
+    # Graph由来の候補・経路と、Tree由来の章一覧・本文ページを分けて返す。
+    # これにより、回答時に候補が見つかった経路と、前後関係を補うために追加したページを区別できる。
+    return {
+        "graph": {"candidates": [
+            {key: candidate[key] for key in ("page_id", "title", "retrieval", "distance", "hops", "path")
+             if key in candidate}
+            for candidate in candidates
+        ]},
+        "tree": {
+            "sections": [sections[section_id] for section_id in sections
+                         if section_id in relevant_section_ids],
+            "pages": result_pages,
+        },
+    }
+
 
 def run_full_context(agent, question: str, model, instructions: str, prompt_template: str):
     """全資料を一括投入し、検索ツールを使わずに回答する。"""
-    prompt = prompt_template.format(materials=get_all_materials(), question=question)
+    prompt = prompt_template.format(
+        materials=get_all_materials(), question=question)
     print(f"[full-context] 入力{len(prompt):,}文字")
     try:
         with agent.override(tools=[], instructions=instructions):

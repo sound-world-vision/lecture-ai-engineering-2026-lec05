@@ -76,7 +76,8 @@ def get_lecture_summary(lecture: int) -> str:
     """
     path = DATA_DIR / "lectures" / f"{lecture:02d}.md"
     if not path.exists():
-        available = sorted(p.stem for p in (DATA_DIR / "lectures").glob("*.md"))
+        available = sorted(p.stem for p in (
+            DATA_DIR / "lectures").glob("*.md"))
         return f"第{lecture}回の要点はまだありません。用意されている回: {', '.join(available)}"
     return path.read_text(encoding="utf-8")
 
@@ -119,6 +120,23 @@ def search_graph(query: str) -> str:
     import sqlite3
     from google.genai.errors import APIError
     from app.retrieval import search_graph as search
+
+    try:
+        return json.dumps(search(query), ensure_ascii=False)
+    except (ValueError, OSError, sqlite3.Error) as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    except APIError as e:
+        return json.dumps({"error": api_error_message(e.code)}, ensure_ascii=False)
+
+
+def search_tree_graph(query: str) -> str:
+    """Graphで関連ページを探し、Treeから同じ章の構成と前後ページを補って返す。
+
+    queryに調べたい内容を指定する。章の構成は見出し情報、本文はGraph候補と前後ページを返す。
+    """
+    import sqlite3
+    from google.genai.errors import APIError
+    from app.retrieval import search_tree_graph as search
 
     try:
         return json.dumps(search(query), ensure_ascii=False)
