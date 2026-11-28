@@ -199,8 +199,12 @@ claude mcp add --transport http hubspot --scope user https://mcp.hubspot.com/ant
 
 ### 演習の MCP サーバー設定との違い
 
-- 設定ファイルの書式自体は Claude Code のプロジェクトスコープの設定ファイルとほぼ同じ
-- ただし Claude Code ではスコープによって格納されるファイルと書式が異なる
+- 演習の設定ファイルにはプロトコルを指定する `type` フィールドが無い点が異なる
+- `command` や `args` の書き方はほぼ同じ
+- `url` の書き方もほぼ同じ
+- Claude Code では `headers` など認証などに必要な情報を渡せる
+- Claude Code では設定ファイルで直接値を指定せず環境変数を展開させることも可能
+- Claude Code ではファイルの格納場所やファイル名がはスコープによって異なる
 - Claude Code では CLI で設定の追加・削除などが可能なためプロプラム的な制御が容易
 
 ### Agent Plugsins Specification
@@ -209,6 +213,7 @@ claude mcp add --transport http hubspot --scope user https://mcp.hubspot.com/ant
 - OpenAI が AWS・Cursor・GitHub・VS Code・Vercel とともに策定
 - Claude Code の .mcp.json の書式はこれに準拠しているという正式な記述は見つけられなかったが、書き方を見る限りでは同じに見える
 - この仕様でも環境変数の展開がサポートされている
+- ただし、Agent Plugins Specification のほうでは作業ディレクトリ `cwd` の指定が可能
 - 参照：https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md
 
 ## 気づき・疑問：
